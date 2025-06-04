@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <title>Simulation du Problème à N Corps en 3D</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #000;
+            color: #fff;
+            font-family: sans-serif;
+            overflow: hidden;
+        }
+        #canvasContainer {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 15px;
+            border-radius: 8px;
+            max-height: 90vh;
+            overflow-y: auto;
+        }
+        #controls label, #controls h4 {
+            display: block;
+            margin-top: 8px;
+        }
+        #controls input {
+            width: 100px;
+            margin-left: 5px;
+        }
+        #controls button {
+            margin-top: 10px;
+            padding: 8px 15px;
+        }
+        #bodyInputsContainer div {
+            border: 1px solid #333;
+            padding: 10px;
+            margin-top: 10px;
+            border-radius: 4px;
+        }
+        .center-btn {
+            margin-left: 10px;
+            padding: 2px 10px;
+            background: #222;
+            color: #fff;
+            border: 1px solid #888;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.9em;
+        }
+        #solarBtn {
+            margin-left: 8px;
+            background: #3864e8;
+            border-color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvasContainer"></div>
+    <div id="controls">
+        <h2>Paramètres de Simulation</h2>
+        <label>
+            Nombre de Corps (N): 
+            <input type="number" id="numBodies" value="3" min="1">
+            <button id="solarBtn">Planètes Système Solaire</button>
+        </label>
+        <button id="generateInputs">Configurer les Corps</button>
+        <hr>
+        <div id="bodyInputsContainer"></div>
+        <hr>
+        <label>Constante G: <input type="number" id="G_const" value="1" step="0.1"></label>
+        <label>Pas de temps (dt): <input type="number" id="dt" value="0.001" step="0.001"></label>
+        <button id="start">Démarrer / Redémarrer</button>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        let scene, camera, renderer, controls;
+        let bodies = [];
+        let animationId;
+        let G = parseFloat(document.getElementById('G_const').value);
+        let dt = parseFloat(document.getElementById('dt').value);
+
+        const bodyColors = ['#FFFF00', '#a9a9a9', '#c2b280', '#00ccff', '#e0e0e0', '#ff0000', '#ffbb00', '#ffd700', '#00ffae', '#0066ff', '#bbbbbb'];
+        const solarNames = ['Soleil','Mercure','Vénus','Terre','Lune','Mars','Jupiter','Saturne','Uranus','Neptune','Pluton'];
+
+        class Body {
+            constructor(x, y, z, vx, vy, vz, mass, color, scene) {
+                this.position = new THREE.Vector3(x, y, z);
+                this.velocity = new THREE.Vector3(vx, vy, vz);
+                this.acceleration = new THREE.Vector3();
+                this.mass = mass;
+                this.color = color;
+                const radius = 0.18 * Math.cbrt(this.mass);
+                const geometry = new THREE.SphereGeometry(radius, 32, 16);
+                const material = new THREE.MeshPhongMaterial({ color: this.color, emissive: this.color, emissiveIntensity: 0.23 });
+                this.mesh = new THREE.Mesh(geometry, material);
+                this.mesh.position.copy(this.position);
+                scene.add(this.mesh);
+                this.pathPoints = [];
+                this.maxPathLength = 700;
+                const lineMaterial = new THREE.LineBasicMaterial({ color: this.color, transparent: true, opacity: 0.7 });
+                const lineGeometry = new THREE.BufferGeometry();
+                this.pathLine = new THREE.Line(lineGeometry, lineMaterial);
+                scene.add(this.pathLine);
+            }
+
+            updateAcceleration(allBodies) {
+                this.acceleration.set(0, 0, 0);
+                for (let other of allBodies) {
+                    if (other === this) continue;
+                    const diff = new THREE.Vector3().subVectors(other.position, this.position);
+                    const distSq = diff.lengthSq();
+                    if (distSq < 0.001) continue;
+                    const dist = Math.sqrt(distSq);
+                    const forceFactor = G * other.mass / (distSq * dist);
+                    this.acceleration.add(diff.multiplyScalar(forceFactor));
+                }
+            }
+
+            update(timeStep) {
+                this.velocity.add(this.acceleration.clone().multiplyScalar(timeStep));
+                this.position.add(this.velocity.clone().multiplyScalar(timeStep));
+                this.mesh.position.copy(this.position);
+                this.pathPoints.push(this.position.clone());
+                if (this.pathPoints.length > this.maxPathLength) {
+                    this.pathPoints.shift();
+                }
+                if (this.pathPoints.length > 1) {
+                    this.pathLine.geometry.setFromPoints(this.pathPoints);
+                }
+            }
+
+            removeFromScene(scene) {
+                if (this.mesh) {
+                    scene.remove(this.mesh);
+                    this.mesh.geometry.dispose();
+                    this.mesh.material.dispose();
+                }
+                if (this.pathLine) {
+                    scene.remove(this.pathLine);
+                    this.pathLine.geometry.dispose();
+                    this.pathLine.material.dispose();
+                }
+            }
+        }
+
+        function initThreeJS() {
+            const container = document.getElementById('canvasContainer');
+            scene = new THREE.Scene();
+            camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 2000);
+            camera.position.set(5, 7, 15);
+            camera.lookAt(0,0,0);
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(container.clientWidth, container.clientHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setClearColor(0x000000);
+            container.innerHTML = '';
+            container.appendChild(renderer.domElement);
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false;
+            controls.minDistance = 1;
+            controls.maxDistance = 500;
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            const pointLight = new THREE.PointLight(0xffffff, 1, 1000);
+            pointLight.position.set(10, 20, 20);
+            scene.add(pointLight);
+            window.addEventListener('resize', onWindowResize, false);
+        }
+
+        function onWindowResize() {
+            const container = document.getElementById('canvasContainer');
+            camera.aspect = container.clientWidth / container.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(container.clientWidth, container.clientHeight);
+        }
+
+        function generateBodyInputs(solarPreset) {
+            const num = solarPreset ? 11 : parseInt(document.getElementById('numBodies').value);
+            const container = document.getElementById('bodyInputsContainer');
+            container.innerHTML = '';
+            let presets = null;
+            if (solarPreset) {
+    const m_sun = 1;
+    const rTerre = 1; // UA
+    const vTerre = 1/Math.sqrt(rTerre);
+    const rLune = 0.00257; // UA (384 400 km)
+    const mTerre = 3.003e-6;
+    const mLune = 3.7e-8;
+    const vLuneRel = Math.sqrt(G * mTerre / rLune);
+    const angleLune = Math.PI/2;
+    presets = [
+        {name:"Soleil",m:m_sun,x:0,y:0,z:0,vx:0,vy:0,vz:1},
+        {name:"Mercure",m:1.6601e-7,x:0.39,y:0,z:0,vx:0,vy:1/Math.sqrt(0.39),vz:1},
+        {name:"Vénus",m:2.447e-6,x:0.72,y:0,z:0,vx:0,vy:1/Math.sqrt(0.72),vz:1},
+        {name:"Terre",m:mTerre,x:rTerre,y:0,z:0,vx:0,vy:vTerre,vz:1},
+        {name:"Lune",
+            m:mLune,
+            x:rTerre + rLune * Math.cos(angleLune),
+            y:rLune * Math.sin(angleLune),
+            z:0,
+            vx: -vLuneRel * Math.sin(angleLune),
+            vy: vTerre + vLuneRel * Math.cos(angleLune),
+            vz:1
+        },
+        {name:"Mars",m:3.227e-7,x:1.52,y:0,z:0,vx:0,vy:1/Math.sqrt(1.52),vz:1},
+        {name:"Jupiter",m:9.5458e-4,x:5.20,y:0,z:0,vx:0,vy:1/Math.sqrt(5.20),vz:1},
+        {name:"Saturne",m:2.857e-4,x:9.54,y:0,z:0,vx:0,vy:1/Math.sqrt(9.54),vz:1},
+        {name:"Uranus",m:4.364e-5,x:19.22,y:0,z:0,vx:0,vy:1/Math.sqrt(19.22),vz:1},
+        {name:"Neptune",m:5.15e-5,x:30.06,y:0,z:0,vx:0,vy:1/Math.sqrt(30.06),vz:1},
+        {name:"Pluton",m:6.55e-9,x:39.48,y:0,z:0,vx:0,vy:1/Math.sqrt(39.48),vz:1}
+    ];
+}
+ else {
+                presets = {
+                    2: [
+                        { m: 10, x: -2, y: 0, z: 0, vx: 0, vy: 0.5, vz: 0 },
+                        { m: 10, x: 2, y: 0, z: 0, vx: 0, vy: -0.5, vz: 0 }
+                    ],
+                    3: [
+                        { m: 1, x: -0.97000436, y: 0.24308753, z: 0, vx: 0.466203685, vy: 0.43236573, vz: 0 },
+                        { m: 1, x: 0.97000436, y: -0.24308753, z: 0, vx: 0.466203685, vy: 0.43236573, vz: 0 },
+                        { m: 1, x: 0, y: 0, z: 0, vx: -0.93240737, vy: -0.86473146, vz: 0 }
+                    ]
+                }[num] || [];
+            }
+            for (let i = 0; i < num; i++) {
+                let p = solarPreset ? presets[i] : (presets[i] || {});
+                const bodyDiv = document.createElement('div');
+                const labelName = solarPreset ? `<b>${solarNames[i]}</b>` : `Corps ${i+1}`;
+                bodyDiv.innerHTML = `
+                    <h4>${labelName} <span style="color:${bodyColors[i % bodyColors.length]}">●</span>
+                        <button class="center-btn" data-body="${i}">Centrer la caméra</button>
+                    </h4>
+                    <label>Masse: <input type="number" id="m${i}" value="${p.m !== undefined ? p.m : (Math.random() * 5 + 1).toFixed(2)}" step="0.00000001"></label>
+                    <label>Pos X: <input type="number" id="x${i}" value="${p.x !== undefined ? p.x : (Math.random() - 0.5) * 10}" step="0.00001"></label>
+                    <label>Pos Y: <input type="number" id="y${i}" value="${p.y !== undefined ? p.y : (Math.random() - 0.5) * 10}" step="0.00001"></label>
+                    <label>Pos Z: <input type="number" id="z${i}" value="${p.z !== undefined ? p.z : (Math.random() - 0.5) * 5}" step="0.00001"></label>
+                    <label>Vel X: <input type="number" id="vx${i}" value="${p.vx !== undefined ? p.vx : (Math.random() - 0.5) * 1}" step="0.00001"></label>
+                    <label>Vel Y: <input type="number" id="vy${i}" value="${p.vy !== undefined ? p.vy : (Math.random() - 0.5) * 1}" step="0.00001"></label>
+                    <label>Vel Z: <input type="number" id="vz${i}" value="${p.vz !== undefined ? p.vz : (Math.random() - 0.5) * 1}" step="0.00001"></label>
+                `;
+                container.appendChild(bodyDiv);
+            }
+            Array.from(document.getElementsByClassName('center-btn')).forEach(btn => {
+                btn.addEventListener('click', function(e) {
+                    const bodyIdx = parseInt(this.getAttribute('data-body'));
+                    centerCameraOnBody(bodyIdx);
+                });
+            });
+            if(solarPreset) document.getElementById('numBodies').value = num;
+        }
+
+        function clearSceneObjects() {
+            if (bodies && bodies.length > 0) {
+                bodies.forEach(body => body.removeFromScene(scene));
+            }
+            bodies = [];
+        }
+
+        function startSimulation() {
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+            }
+            clearSceneObjects();
+            G = parseFloat(document.getElementById('G_const').value);
+            dt = parseFloat(document.getElementById('dt').value);
+            const num = parseInt(document.getElementById('numBodies').value);
+            for (let i = 0; i < num; i++) {
+                const mass = parseFloat(document.getElementById(`m${i}`).value);
+                const x = parseFloat(document.getElementById(`x${i}`).value);
+                const y = parseFloat(document.getElementById(`y${i}`).value);
+                const z = parseFloat(document.getElementById(`z${i}`).value);
+                const vx = parseFloat(document.getElementById(`vx${i}`).value);
+                const vy = parseFloat(document.getElementById(`vy${i}`).value);
+                const vz = parseFloat(document.getElementById(`vz${i}`).value);
+                const color = bodyColors[i % bodyColors.length];
+                bodies.push(new Body(x, y, z, vx, vy, vz, mass, color, scene));
+            }
+            if(bodies.length > 0 && controls) {
+                controls.target.set(0,0,0);
+            }
+            animate();
+        }
+
+        function animate() {
+            animationId = requestAnimationFrame(animate);
+            for (let body of bodies) {
+                body.updateAcceleration(bodies);
+            }
+            for (let body of bodies) {
+                body.update(dt);
+            }
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        function centerCameraOnBody(idx) {
+            if (!bodies[idx]) return;
+            const pos = bodies[idx].position.clone();
+            controls.target.copy(pos);
+            const offset = new THREE.Vector3(10, 7, 10);
+            camera.position.copy(pos.clone().add(offset));
+            camera.lookAt(pos);
+        }
+
+        document.getElementById('generateInputs').addEventListener('click', function(){ generateBodyInputs(false); });
+        document.getElementById('start').addEventListener('click', startSimulation);
+        document.getElementById('solarBtn').addEventListener('click', function(){ generateBodyInputs(true); });
+
+        initThreeJS();
+        generateBodyInputs(false);
+
+    </script>
+</body>
+</html>
